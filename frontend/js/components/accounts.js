@@ -205,10 +205,12 @@ const AccountsPage = {
     },
 
     async removeAccount(fakeid, nickname) {
-        Modal.confirm('删除确认', `确定要从收藏中移除「${nickname}」吗？`, async () => {
+        Modal.confirm('删除确认', `确定要从收藏中移除「${nickname}」吗？如已开启 RSS 自动抓取将一并停止。`, async () => {
             try {
-                await API.accounts.remove(fakeid);
-                Toast.success(`已移除: ${nickname}`);
+                const res = await API.accounts.remove(fakeid);
+                Toast.success(res?.rss_unsubscribed
+                    ? `已移除: ${nickname}（已同时停止 RSS 自动抓取）`
+                    : `已移除: ${nickname}`);
                 await AccountsPage.loadAccounts();
             } catch (err) {
                 // error shown by API

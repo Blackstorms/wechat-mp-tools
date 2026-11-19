@@ -52,8 +52,12 @@ _LAST_ACTIVE_SYNC_AT: dict[str, float] = {}
 
 # 对齐官方客户端全局节流与短时频控冷却，避免瞬时并发冲击 i.weread.qq.com
 WEREAD_MIN_INTERVAL = 0.35
+# 触发 -2014 后节流间隔临时加严到该值，并在恢复窗口内线性衰减回基础值
+WEREAD_MAX_INTERVAL = 1.5
+_PACE_BOOST_WINDOW = 600.0
 _PACE_LOCK = threading.Lock()
 _LAST_WEREAD_REQ_AT = 0.0
+_PACE_BOOST_UNTIL = 0.0
 
 RATE_LIMIT_COOLDOWN = 15
 _RATE_LIMIT_LOCK = threading.Lock()
@@ -73,12 +77,22 @@ class WeReadRateLimitError(RuntimeError):
         self.cooldown_left = int(max(0, cooldown_left))
 
 
+def current_pace_interval() -> float:
+    """当前生效的最小请求间隔：频控加严窗口内线性衰减回基础值。"""
+    with _PACE_LOCK:
+        remain = _PACE_BOOST_UNTIL - time.time()
+    if remain <= 0:
+        return WEREAD_MIN_INTERVAL
+    ratio = min(1.0, remain / _PACE_BOOST_WINDOW)
+    return WEREAD_MIN_INTERVAL + (WEREAD_MAX_INTERVAL - WEREAD_MIN_INTERVAL) * ratio
+
+
 def pace_weread_request(url: str):
     """对 i.weread.qq.com 请求施加最小间隔 + 随机抖动，避免并发冲击频控阈值。"""
     if "i.weread.qq.com" not in (url or ""):
         return
     global _LAST_WEREAD_REQ_AT
-    interval = WEREAD_MIN_INTERVAL + random.uniform(0.05, 0.18)
+    interval = current_pace_interval() + random.uniform(0.05, 0.18)
     with _PACE_LOCK:
         now = time.time()
         target = max(now, _LAST_WEREAD_REQ_AT + interval)
@@ -97,17 +111,25 @@ def get_rate_limit_status() -> tuple[bool, int]:
 
 def mark_rate_limited(url: str, cooldown: int = RATE_LIMIT_COOLDOWN) -> int:
     """登记 -2014 频控冷却窗口（对齐官方重试策略，不盲目重放且不误弹防水墙）。"""
+    global _PACE_BOOST_UNTIL
     with _RATE_LIMIT_LOCK:
         RATE_LIMIT["until"] = max(RATE_LIMIT["until"], time.time() + cooldown)
         RATE_LIMIT["hits"] += 1
         RATE_LIMIT["last_url"] = url or ""
-        return max(0, int(round(RATE_LIMIT["until"] - time.time())))
+        left = max(0, int(round(RATE_LIMIT["until"] - time.time())))
+    # 命中频控后加严全局节流，降低窗口期内的请求密度
+    with _PACE_LOCK:
+        _PACE_BOOST_UNTIL = max(_PACE_BOOST_UNTIL, time.time() + _PACE_BOOST_WINDOW)
+    return left
 
 
 def clear_rate_limit():
     """重置本地 -2014 频控冷却窗口。"""
+    global _PACE_BOOST_UNTIL
     with _RATE_LIMIT_LOCK:
         RATE_LIMIT["until"] = 0.0
+    with _PACE_LOCK:
+        _PACE_BOOST_UNTIL = 0.0
 
 
 def build_apk_headers(extra: dict = None) -> dict:

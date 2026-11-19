@@ -195,9 +195,17 @@ def _resolve_review_info(review_id: str, headers: dict) -> dict:
     if short_id:
         info["doc_url"] = f"https://mp.weixin.qq.com/s/{short_id}"
 
+    from backend.weread_signer import get_rate_limit_status, pace_weread_request
+    url = f"https://i.weread.qq.com/review/single?reviewId={review_id}"
+    if get_rate_limit_status()[0]:
+        # 频控窗口内不发请求，缓存负结果，由本地短链逻辑兜底
+        with _review_cache_lock:
+            _put_review_cache_locked(review_id, info)
+        return info
+
     try:
-        url = f"https://i.weread.qq.com/review/single?reviewId={review_id}"
         s = get_weread_session()
+        pace_weread_request(url)
         resp = s.get(url, headers=headers, timeout=6)
         if resp.status_code == 200:
             data = resp.json()
@@ -282,6 +290,7 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
             sanitize_apk_headers,
             pace_weread_request,
             mark_rate_limited,
+            get_rate_limit_status,
             activate_terminal_session,
         )
         from backend.waterwall import detect_waterwall, waterwall_hit, record_failure
@@ -304,6 +313,9 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
             last_h = h
             last_acc = acc_id
             try:
+                # 频控冷却窗口内直接短路，不再发包，让该页抓取软性失败
+                if get_rate_limit_status()[0]:
+                    return None, last_h, last_acc
                 pace_weread_request(req_url)
                 r = s.get(req_url, headers=h, timeout=10)
                 last_resp = r
@@ -519,7 +531,7 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
 
             return doc_u, int(c_time or 0), is_orig
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, max(1, len(raw_items)))) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, max(1, len(raw_items)))) as ex:
             metas = list(ex.map(_get_item_meta, raw_items))
 
         for it, (doc_u, create_t, is_orig) in zip(raw_items, metas):

@@ -34,8 +34,13 @@ UPLOAD_QUARANTINE_THRESHOLD = 3
 # 上传审计日志最多保留的记录条数
 MAX_UPLOAD_LOG = 100
 
-# 并发抓取的最大线程数（设为 8 个兼顾并发与风控，同时极大减少 Linux glibc 线程内存池 arena 碎片）
-MAX_FETCH_WORKERS = 8
+# 并发抓取的默认线程数（保守取值，避免多抓取线程叠加触发微信读书 -2014 频控；
+# 可通过设置项 rss_fetch_workers 覆盖，调整后需重启生效）
+MAX_FETCH_WORKERS = 3
+
+# 命中 -2014 频控后的调度级退避：暂停派发抓取的时长与连续命中时的上限
+RATE_LIMIT_PAUSE_SECONDS = 180
+RATE_LIMIT_PAUSE_MAX_SECONDS = 600
 
 # 全局兜底上传的间隔（分钟）：扫描所有账号的待传文章，兜住因账号不属于
 # 当前启用订阅（改名/退订/禁用/手动下载）而永远不会被按账号触发上传的文章
@@ -50,10 +55,22 @@ class RssScheduler:
         self._stop_event = threading.Event()
         self._lock = threading.Lock()          # 保护 rss_subscriptions.json
         self._history_lock = threading.Lock()  # 保护 DOWNLOAD_HISTORY_FILE 读改写
-        self._executor = ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS, thread_name_prefix="rss-fetch")
+        self._executor = ThreadPoolExecutor(max_workers=self._fetch_worker_count(), thread_name_prefix="rss-fetch")
         self._fetching: set[str] = set()       # 正在抓取中的 fakeid，防重复提交
         self._fetching_lock = threading.Lock() # 保护 _fetching 集合
         self._last_upload_response: str | None = None  # 最近一次网关响应摘要（排查静默丢弃用）
+        self._rl_pause_until = 0.0   # 调度级频控退避：该时间前不派发新抓取
+        self._rl_pause_start = 0.0   # 本轮连续退避的起点，用于封顶总退避时长
+
+    @staticmethod
+    def _fetch_worker_count() -> int:
+        """抓取线程数：设置项 rss_fetch_workers 优先，默认 MAX_FETCH_WORKERS，上限 8。"""
+        try:
+            from backend.config import get_settings
+            value = int(get_settings().get("rss_fetch_workers", MAX_FETCH_WORKERS) or MAX_FETCH_WORKERS)
+        except Exception:
+            value = MAX_FETCH_WORKERS
+        return max(1, min(8, value))
 
     # ── 订阅管理 ──────────────────────────────────────────
 
@@ -630,6 +647,13 @@ class RssScheduler:
         # 错峰延时：随机等待 3 到 8 秒，分散高并发请求，避免触发微信风控
         time.sleep(random.uniform(3.0, 8.0))
 
+        # 频控窗口内直接放弃本轮：不更新订阅状态，next_fetch_time 保持过期，
+        # 待退避结束后由调度器自然重新派发
+        from backend.weread_signer import get_rate_limit_status
+        if get_rate_limit_status()[0]:
+            logger.info("RSS 抓取跳过 [%s]: 处于微信读书频控冷却窗口", nickname)
+            return
+
         try:
             existing = self.get_articles(nickname)
             existing_links = {normalize_wechat_url(a.get("link")) for a in existing if a.get("link")}
@@ -947,6 +971,20 @@ class RssScheduler:
             return
 
         now = time.time()
+
+        # 频控短路：命中 -2014 冷却窗口时进入调度级退避，暂停派发抓取，
+        # 避免冷却期内反复把账号打回频控；连续命中时退避滚动延长但有上限
+        from backend.weread_signer import get_rate_limit_status
+        throttled, _left = get_rate_limit_status()
+        if throttled:
+            if now >= self._rl_pause_until:
+                self._rl_pause_start = now
+            horizon = min(now + RATE_LIMIT_PAUSE_SECONDS,
+                          self._rl_pause_start + RATE_LIMIT_PAUSE_MAX_SECONDS)
+            self._rl_pause_until = max(self._rl_pause_until, horizon)
+        if now < self._rl_pause_until:
+            return
+
         due_subs = []
 
         with self._lock:

@@ -63,6 +63,8 @@ DEFAULT_SETTINGS = {
     "rss_end_minute": 0,
     "rss_upload_enabled": False,
     "rss_upload_url": "",
+    # RSS 定时抓取线程数（保守默认 3，避免并发触发微信读书频控；调大需重启生效）
+    "rss_fetch_workers": 3,
     # RSS 输出：单次条数上限（0 = 不限制，保持桌面版原有行为）、缓存秒数、
     # 访问令牌（留空不鉴权）、对外地址
     "rss_max_items": 0,

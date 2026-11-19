@@ -337,7 +337,7 @@ def add_account():
 
 @accounts_bp.route("/<fakeid>", methods=["DELETE"])
 def remove_account(fakeid):
-    """取消收藏公众号"""
+    """取消收藏公众号（联动停止其 RSS 定时抓取，避免留下幽灵订阅）"""
     accounts = _load_accounts()
     target_book_id = biz_to_book_id(fakeid)
 
@@ -348,7 +348,15 @@ def remove_account(fakeid):
         return jsonify({"error": "未找到该公众号"}), 404
 
     _save_accounts(accounts)
-    return jsonify({"message": "已取消收藏"})
+
+    rss_unsubscribed = False
+    try:
+        from backend.rss_scheduler import rss_scheduler
+        rss_unsubscribed = rss_scheduler.remove_subscription(fakeid)
+    except Exception:
+        pass
+
+    return jsonify({"message": "已取消收藏", "rss_unsubscribed": rss_unsubscribed})
 
 
 @accounts_bp.route("/<fakeid>", methods=["PUT"])
