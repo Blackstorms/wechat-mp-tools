@@ -80,6 +80,7 @@ def test_rss_fetch_marks_rate_limited_batch_as_failed(monkeypatch):
 
     assert sub["last_fetch_count"] == 0
     assert sub["total_articles"] == 8
+    assert sub["last_fetch_status"] == "rate_limited"
     assert "触发微信读书频控 (-2014)" in sub["last_error"]
     # 失败后固定 10 分钟重试，忽略 interval_minutes=360 的配置
     assert before + 600 <= sub["next_fetch_time"] <= after + 600
@@ -107,6 +108,7 @@ def test_rss_fetch_marks_existing_cooldown_as_failed(monkeypatch):
         after = time.time()
 
         assert sub["last_fetch_count"] == 0
+        assert sub["last_fetch_status"] == "rate_limited"
         assert "触发微信读书频控 (-2014)" in sub["last_error"]
         assert str(cooldown_left) in sub["last_error"]
         # 失败后固定 10 分钟重试，忽略 interval_minutes=360 的配置
@@ -139,5 +141,38 @@ def test_rss_fetch_success_keeps_configured_interval(monkeypatch):
     after = time.time()
 
     assert sub["last_error"] is None
+    assert sub["last_fetch_status"] == "success"
     # 成功时仍按 interval_minutes=360 的 ±25% 抖动区间重排
     assert before + 270 * 60 <= sub["next_fetch_time"] <= after + 450 * 60
+
+
+def test_rss_fetch_generic_failure_marks_failed(monkeypatch):
+    signer.clear_rate_limit()
+    sub = {"fakeid": "fakeid_1", "nickname": "每日经济新闻", "interval_minutes": 360}
+
+    scheduler = RssScheduler.__new__(RssScheduler)
+    scheduler._lock = threading.Lock()
+    scheduler._history_lock = threading.Lock()
+    scheduler.get_articles = lambda nickname: []
+    scheduler.get_subscriptions = lambda: [sub]
+    scheduler._save_subscriptions = lambda subs: None
+    scheduler._save_articles = lambda nickname, articles: None
+
+    monkeypatch.setattr(rss_mod.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        articles_mod,
+        "_fetch_articles_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("网络超时")),
+    )
+    monkeypatch.setattr(config_mod, "load_json", lambda path, default=None: default)
+    monkeypatch.setattr(config_mod, "save_json", lambda path, data: None)
+    monkeypatch.setattr(config_mod, "get_settings", lambda: {"rss_upload_enabled": False})
+
+    before = time.time()
+    scheduler._fetch_for_account(sub)
+    after = time.time()
+
+    assert sub["last_fetch_status"] == "failed"
+    assert sub["last_error"] == "网络超时"
+    # 普通失败同样固定 10 分钟重试
+    assert before + 600 <= sub["next_fetch_time"] <= after + 600

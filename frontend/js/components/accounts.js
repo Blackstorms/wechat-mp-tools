@@ -274,6 +274,12 @@ const AccountsPage = {
                         <span>${sub?.last_fetch_time ? new Date(sub.last_fetch_time * 1000).toLocaleString() : '暂无'}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">上次抓取状态：</span>
+                        <span style="font-weight: 600; color: ${this.rssFetchStatusColor(sub)};">
+                            ${this.formatRssFetchStatus(sub)}
+                        </span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
                         <span style="color: var(--text-muted);">下次预计：</span>
                         <span>${sub?.next_fetch_time ? new Date(sub.next_fetch_time * 1000).toLocaleString() : '等待调度'}</span>
                     </div>
@@ -575,6 +581,28 @@ const AccountsPage = {
             return `约 ${range.min}-${range.max} 分钟随机`;
         }
         return `约 ${this.formatRssDuration(range.min)} - ${this.formatRssDuration(range.max)} 随机`;
+    },
+
+    getRssFetchStatus(sub) {
+        if (!sub || !sub.last_fetch_time) return 'none';
+        // 老数据没有 last_fetch_status 字段时按 last_error 兜底推断
+        return sub.last_fetch_status || (sub.last_error ? 'failed' : 'success');
+    },
+
+    formatRssFetchStatus(sub) {
+        const status = this.getRssFetchStatus(sub);
+        if (status === 'none') return '暂无';
+        if (status === 'rate_limited') return '⚠️ 触发频控';
+        if (status === 'failed') return '❌ 失败';
+        return '✅ 已完成';
+    },
+
+    rssFetchStatusColor(sub) {
+        const status = this.getRssFetchStatus(sub);
+        if (status === 'rate_limited') return 'var(--badge-warning-color, #ff9800)';
+        if (status === 'failed') return 'var(--error)';
+        if (status === 'none') return 'var(--text-muted)';
+        return 'var(--success, #4caf50)';
     },
 
     formatRssUploadStatus(sub, globalUploadEnabled) {

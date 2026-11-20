@@ -666,6 +666,7 @@ class RssScheduler:
                         s["last_fetch_time"] = now
                         s["last_fetch_count"] = 0
                         s["last_error"] = last_error
+                        s["last_fetch_status"] = "rate_limited"
                         self._schedule_failure_retry(s, now)
                         break
                 self._save_subscriptions(subs)
@@ -882,6 +883,7 @@ class RssScheduler:
                     s["last_fetch_time"] = now
                     s["last_fetch_count"] = new_count
                     s["last_error"] = last_error
+                    s["last_fetch_status"] = "rate_limited" if rate_limited else ("failed" if last_error else "success")
                     s["total_articles"] = total_articles
                     if last_error:
                         self._schedule_failure_retry(s, now)
