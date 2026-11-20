@@ -42,6 +42,9 @@ MAX_FETCH_WORKERS = 3
 RATE_LIMIT_PAUSE_SECONDS = 180
 RATE_LIMIT_PAUSE_MAX_SECONDS = 600
 
+# 抓取失败后的快速重试间隔（分钟）：失败轮不按订阅的 interval_minutes 计算下次执行时间
+FETCH_FAILURE_RETRY_MINUTES = 10
+
 # 全局兜底上传的间隔（分钟）：扫描所有账号的待传文章，兜住因账号不属于
 # 当前启用订阅（改名/退订/禁用/手动下载）而永远不会被按账号触发上传的文章
 GLOBAL_UPLOAD_SWEEP_MINUTES = 30
@@ -643,15 +646,29 @@ class RssScheduler:
         new_count = 0
         total_articles = sub.get("total_articles", 0)
         upload_result = None
+        rate_limited = False
 
         # 错峰延时：随机等待 3 到 8 秒，分散高并发请求，避免触发微信风控
         time.sleep(random.uniform(3.0, 8.0))
 
-        # 频控窗口内直接放弃本轮：不更新订阅状态，next_fetch_time 保持过期，
-        # 待退避结束后由调度器自然重新派发
-        from backend.weread_signer import get_rate_limit_status
-        if get_rate_limit_status()[0]:
-            logger.info("RSS 抓取跳过 [%s]: 处于微信读书频控冷却窗口", nickname)
+        # 已处于频控冷却窗口：本轮视为失败并写入订阅状态；
+        # 下次拉取固定 10 分钟后，不按 interval_minutes 配置重排
+        from backend.weread_signer import get_rate_limit_status, WeReadRateLimitError
+        throttled_now, cooldown_left = get_rate_limit_status()
+        if throttled_now:
+            last_error = f"触发微信读书频控 (-2014)，冷却 {cooldown_left} 秒，本轮抓取失败"
+            logger.warning("RSS 抓取失败 [%s]: %s", nickname, last_error)
+            with self._lock:
+                subs = self.get_subscriptions()
+                for s in subs:
+                    if s.get("fakeid") == fakeid:
+                        now = time.time()
+                        s["last_fetch_time"] = now
+                        s["last_fetch_count"] = 0
+                        s["last_error"] = last_error
+                        self._schedule_failure_retry(s, now)
+                        break
+                self._save_subscriptions(subs)
             return
 
         try:
@@ -802,6 +819,10 @@ class RssScheduler:
                         if i < len(new_articles) - 1:
                             time.sleep(delay)
 
+            except WeReadRateLimitError as e:
+                last_error = str(e)
+                rate_limited = True
+                logger.warning("RSS 抓取失败 [%s]: %s", nickname, e)
             except PermissionError as e:
                 last_error = "登录已过期"
                 logger.warning("RSS 抓取跳过 [%s]: 登录已过期", nickname)
@@ -837,10 +858,12 @@ class RssScheduler:
                         disk_history.append(item)
                 history = disk_history
 
-                total_articles = sum(
-                    1 for item in history
-                    if isinstance(item, dict) and item.get("account") == nickname and item.get("success")
-                )
+                # 频控失败时保留订阅已有的 total_articles，避免按空历史重算清零
+                if not rate_limited:
+                    total_articles = sum(
+                        1 for item in history
+                        if isinstance(item, dict) and item.get("account") == nickname and item.get("success")
+                    )
                 # 以下载历史为准上传（本轮新文章 + 历史中所有未上传/未隔离的文章会一并重试）
                 upload_result = self._run_upload(history, trigger="auto", account=nickname)
                 save_json(DOWNLOAD_HISTORY_FILE, history)
@@ -860,7 +883,10 @@ class RssScheduler:
                     s["last_fetch_count"] = new_count
                     s["last_error"] = last_error
                     s["total_articles"] = total_articles
-                    self._schedule_next_fetch(s, now)
+                    if last_error:
+                        self._schedule_failure_retry(s, now)
+                    else:
+                        self._schedule_next_fetch(s, now)
                     if upload_result:
                         if upload_result.get("attempted", False):
                             s["last_upload_time"] = time.time()
@@ -934,6 +960,12 @@ class RssScheduler:
     def _schedule_next_fetch(self, sub: dict, start_time: float | None = None) -> float:
         min_minutes, max_minutes = self._get_interval_range_minutes(sub.get("interval_minutes", 60))
         next_fetch_time = (start_time or time.time()) + random.randint(min_minutes * 60, max_minutes * 60)
+        sub["next_fetch_time"] = next_fetch_time
+        return next_fetch_time
+
+    def _schedule_failure_retry(self, sub: dict, start_time: float | None = None) -> float:
+        """抓取失败后的重排：固定 10 分钟后重试，忽略订阅配置的 interval_minutes"""
+        next_fetch_time = (start_time or time.time()) + FETCH_FAILURE_RETRY_MINUTES * 60
         sub["next_fetch_time"] = next_fetch_time
         return next_fetch_time
 

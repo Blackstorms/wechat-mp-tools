@@ -28,6 +28,7 @@ from backend.config import (
 from backend.account_pool import borrow_session, borrow_weread_session, account_pool, get_weread_session
 from backend.accounts import biz_to_book_id
 from backend.wechat_url import normalize_wechat_short_url, short_id_from_review_id
+from backend.weread_signer import WeReadRateLimitError
 from backend.runtime import desktop_available, host_path_hint, release_memory
 from backend.request_profile import sleep_backoff, sleep_throttled
 
@@ -313,15 +314,20 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
             last_h = h
             last_acc = acc_id
             try:
-                # 频控冷却窗口内直接短路，不再发包，让该页抓取软性失败
-                if get_rate_limit_status()[0]:
-                    return None, last_h, last_acc
+                # 频控冷却窗口内直接短路并显式失败，避免被上层误判为空文章列表
+                throttled_now, cooldown_left = get_rate_limit_status()
+                if throttled_now:
+                    raise WeReadRateLimitError(
+                        f"触发微信读书频控 (-2014)，冷却 {cooldown_left} 秒，本轮抓取失败",
+                        cooldown_left=cooldown_left,
+                    )
                 pace_weread_request(req_url)
                 r = s.get(req_url, headers=h, timeout=10)
                 last_resp = r
 
-                # ── 优先检测腾讯防水墙 (TCaptcha) ──
-                ww_marker = detect_waterwall(r.status_code, r.text)
+                # 先识别明确的频控响应，避免 -2014 被防水墙短文本特征抢先拦截
+                is_rate_limit_response = r.status_code == 429 or "-2014" in r.text
+                ww_marker = "" if is_rate_limit_response else detect_waterwall(r.status_code, r.text)
                 if ww_marker:
                     record_failure(req_url, r.status_code, r.headers, r.text, ww_marker)
                     waterwall_hit(req_url, r.status_code, ww_marker)
@@ -342,7 +348,12 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                             cooldown_left = mark_rate_limited(req_url)
                             record_failure(req_url, r.status_code, r.headers, r.text, "-2014")
                             account_pool.report(acc_id, status_code=200, ret=-2014, error_msg=f"触发频控 (-2014)，冷却 {cooldown_left}s")
-                            return r, h, acc_id
+                            raise WeReadRateLimitError(
+                                f"触发微信读书频控 (-2014)，冷却 {cooldown_left} 秒，本轮抓取失败",
+                                cooldown_left=cooldown_left,
+                            )
+                    except WeReadRateLimitError:
+                        raise
                     except Exception:
                         pass
 
@@ -360,10 +371,13 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                     #    不盲目原地强行重放（避免雪上加霜），也不误弹 -2041 防水墙滑块！
                     if err_c == -2014 or "-2014" in r.text or r.status_code == 429:
                         cooldown_left = mark_rate_limited(req_url)
-                        print(f"[_fetch_articles_page] 账号 [{acc_id}] 触发网关频控 (-2014)，进入 {cooldown_left}s 冷却保护并切换账号...", flush=True)
+                        print(f"[_fetch_articles_page] 账号 [{acc_id}] 触发网关频控 (-2014)，进入 {cooldown_left}s 冷却保护，当前批次标记失败...", flush=True)
                         record_failure(req_url, r.status_code, r.headers, r.text, "-2014")
                         account_pool.report(acc_id, status_code=r.status_code, ret=-2014, error_msg=f"触发高频风控 (-2014)，冷却 {cooldown_left}s")
-                        return r, h, acc_id
+                        raise WeReadRateLimitError(
+                            f"触发微信读书频控 (-2014)，冷却 {cooldown_left} 秒，本轮抓取失败",
+                            cooldown_left=cooldown_left,
+                        )
 
                     # 2. 网关超时 -2012 (对齐 WRRetryHandler.canRetryTimeOut / whetherNeedToRetry 策略)
                     elif err_c == -2012 or "-2012" in r.text:
@@ -404,6 +418,8 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                     sleep_backoff(att + 1, base=0.4, cap=4.0)
                     continue
                 return r, h, acc_id
+            except WeReadRateLimitError:
+                raise
             except Exception as e:
                 logger.debug("[_fetch_articles_page] 网络异常: %s", e)
                 sleep_backoff(att + 1, base=0.5, cap=4.0)
@@ -441,6 +457,8 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                     has_more = bool(data.get("hasMore", len(raw_items) >= count))
                 elif resp_chap.status_code in (429, 499):
                     print(f"[_fetch_articles_page] mp/chapters 返回 HTTP {resp_chap.status_code}，启用多级聚合引擎安全平滑降级...", flush=True)
+        except WeReadRateLimitError:
+            raise
         except Exception as e:
             logger.debug("[_fetch_articles_page] mp/chapters 异常: %s", e)
 
@@ -455,6 +473,8 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                 active_acc_id = acc_alist or active_acc_id
                 al_data = resp_alist.json()
                 raw_items = al_data.get("reviews") or al_data.get("data") or []
+        except WeReadRateLimitError:
+            raise
         except Exception as e:
             logger.debug("[_fetch_articles_page] article/list 备用拉取异常: %s", e)
 
@@ -485,6 +505,8 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                             "item_show_type": 0,
                             "id": rid,
                         })
+        except WeReadRateLimitError:
+            raise
         except Exception as e:
             logger.debug("[_fetch_articles_page] mp/cover 获取异常: %s", e)
 
@@ -623,6 +645,17 @@ def get_articles(fakeid):
     except PermissionError as e:
         print(f"[Articles API] PermissionError in {time.time() - t_start:.2f}s: {e}", flush=True)
         return jsonify({"error": str(e)}), 401
+    except WeReadRateLimitError as e:
+        print(f"[Articles API] Rate limited in {time.time() - t_start:.2f}s: {e}", flush=True)
+        return jsonify({
+            "articles": [],
+            "total": 0,
+            "count": 0,
+            "throttled": True,
+            "errcode": -2014,
+            "cooldown_left": e.cooldown_left,
+            "error": str(e),
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
