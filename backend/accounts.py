@@ -643,3 +643,105 @@ def rss_upload_log():
     account = request.args.get("account")
     limit = request.args.get("limit", 30, type=int)
     return jsonify({"logs": rss_scheduler.get_upload_logs(account=account, limit=limit)})
+
+
+# ---------------------------------------------------------------- 导出 Excel
+
+_XLSX_CONTENT_TYPES = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    '<Default Extension="xml" ContentType="application/xml"/>'
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    '</Types>'
+)
+
+_XLSX_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+    '</Relationships>'
+)
+
+_XLSX_WORKBOOK = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    '<sheets><sheet name="公众号RSS" sheetId="1" r:id="rId1"/></sheets>'
+    '</workbook>'
+)
+
+_XLSX_WORKBOOK_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+    '</Relationships>'
+)
+
+
+def _xlsx_cell(ref: str, value: str) -> str:
+    return f'<c r="{ref}" t="inlineStr"><is><t>{html.escape(str(value), quote=False)}</t></is></c>'
+
+
+def _build_accounts_xlsx(rows: list) -> bytes:
+    """用标准库 zipfile 拼一个最小 xlsx（inlineStr，无 sharedStrings）。"""
+    import io
+    import zipfile
+
+    xml_rows = []
+    for idx, (name, rss_url) in enumerate(rows, start=1):
+        xml_rows.append(
+            f'<row r="{idx}">{_xlsx_cell(f"A{idx}", name)}{_xlsx_cell(f"B{idx}", rss_url)}</row>'
+        )
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<cols><col min="1" max="1" width="32" customWidth="1"/>'
+        '<col min="2" max="2" width="90" customWidth="1"/></cols>'
+        f'<sheetData>{"".join(xml_rows)}</sheetData>'
+        '</worksheet>'
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _XLSX_CONTENT_TYPES)
+        zf.writestr("_rels/.rels", _XLSX_RELS)
+        zf.writestr("xl/workbook.xml", _XLSX_WORKBOOK)
+        zf.writestr("xl/_rels/workbook.xml.rels", _XLSX_WORKBOOK_RELS)
+        zf.writestr("xl/worksheets/sheet1.xml", sheet)
+    return buf.getvalue()
+
+
+@accounts_bp.route("/export-excel", methods=["GET"])
+def export_accounts_excel():
+    """导出已收藏公众号为 Excel：公众号名称 + RSS 地址两列。"""
+    from flask import Response
+
+    from backend.config import get_settings
+    from backend.rss_feed import _cfg, _resolve_base_url
+
+    settings = get_settings()
+    base_url = _resolve_base_url(request, settings)
+    token = str(_cfg(settings, "rss_token", "RSS_TOKEN", "") or "").strip()
+    token_query = f"?token={urllib.parse.quote(token)}" if token else ""
+
+    rows = [("公众号名称", "RSS地址")]
+    for acc in _load_accounts():
+        nickname = str(acc.get("nickname") or "").strip() if isinstance(acc, dict) else ""
+        if not nickname:
+            continue
+        rss_url = f"{base_url}api/articles/rss/{urllib.parse.quote(nickname)}{token_query}"
+        rows.append((nickname, rss_url))
+
+    data = _build_accounts_xlsx(rows)
+    filename = f"公众号RSS订阅_{time.strftime('%Y%m%d')}.xlsx"
+    disposition = (
+        f"attachment; filename=accounts_rss.xlsx; "
+        f"filename*=UTF-8''{urllib.parse.quote(filename)}"
+    )
+    return Response(
+        data,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": disposition},
+    )

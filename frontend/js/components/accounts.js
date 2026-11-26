@@ -37,7 +37,12 @@ const AccountsPage = {
             <div class="card">
                 <div class="card-header">
                     <h3 class="card-title">⭐ 已收藏的公众号</h3>
-                    <span class="badge badge-info" id="accounts-count">0 个</span>
+                    <div style="display: flex; gap: var(--spacing-sm); align-items: center;">
+                        <button class="btn btn-sm btn-secondary" onclick="AccountsPage.exportExcel()">
+                            📥 导出Excel
+                        </button>
+                        <span class="badge badge-info" id="accounts-count">0 个</span>
+                    </div>
                 </div>
                 <div id="accounts-list" class="animate-stagger">
                     <div class="loading-screen" style="min-height: 200px;">
@@ -223,6 +228,16 @@ const AccountsPage = {
                 // error shown by API
             }
         });
+    },
+
+    exportExcel() {
+        const link = document.createElement('a');
+        link.href = '/api/accounts/export-excel';
+        link.download = '';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        Toast.success('正在导出 Excel...');
     },
 
     buildRssUrl(nickname, settings) {
