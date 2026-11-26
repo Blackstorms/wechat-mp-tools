@@ -55,8 +55,12 @@ const AccountsPage = {
 
     async loadAccounts() {
         try {
-            const data = await API.accounts.list();
+            const [data, settings] = await Promise.all([
+                API.accounts.list(),
+                API.settings.get().catch(() => ({})),
+            ]);
             this.accounts = data.accounts || [];
+            this.rssSettings = settings || {};
             this.renderAccounts();
         } catch (err) {
             document.getElementById('accounts-list').innerHTML =
@@ -111,6 +115,9 @@ const AccountsPage = {
                     </button>
                     <button class="btn btn-sm" style="background: rgba(255, 152, 0, 0.12); color: #ff9800; border: 1px solid rgba(255, 152, 0, 0.25);" onclick="event.stopPropagation(); AccountsPage.showRssModal('${acc.fakeid}', '${safeName}')">
                         📡 RSS
+                    </button>
+                    <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); AccountsPage.copyRssUrlFor('${safeName}', this)">
+                        🔗 复制RSS
                     </button>
                     <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); AccountsPage.removeAccount('${acc.fakeid}', '${safeName}')">
                         🗑
@@ -218,6 +225,55 @@ const AccountsPage = {
         });
     },
 
+    buildRssUrl(nickname, settings) {
+        settings = settings || this.rssSettings || {};
+        let baseOrigin = (settings.rss_base_url || '').trim().replace(/\/+$/, '');
+        if (baseOrigin && !/^https?:\/\//i.test(baseOrigin)) {
+            baseOrigin = 'https://' + baseOrigin;
+        }
+        baseOrigin = baseOrigin || window.location.origin;
+        const token = (settings.rss_token || '').trim();
+        const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
+        return `${baseOrigin}/api/articles/rss/${encodeURIComponent(nickname)}${tokenQuery}`;
+    },
+
+    async copyRssUrlFor(nickname, btn) {
+        let settings = this.rssSettings;
+        if (!settings) {
+            try {
+                settings = await API.settings.get();
+                this.rssSettings = settings || {};
+            } catch (err) {
+                settings = {};
+            }
+        }
+        const rssUrl = this.buildRssUrl(nickname, settings);
+        const restore = () => { if (btn) btn.innerHTML = '🔗 复制RSS'; };
+        try {
+            await navigator.clipboard.writeText(rssUrl);
+            if (btn) {
+                btn.innerHTML = '✅ 已复制';
+                setTimeout(restore, 2000);
+            }
+            Toast.success('RSS 地址已复制到剪贴板');
+        } catch {
+            // Fallback for older browsers / non-secure contexts
+            const textarea = document.createElement('textarea');
+            textarea.value = rssUrl;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            textarea.remove();
+            if (btn) {
+                btn.innerHTML = '✅ 已复制';
+                setTimeout(restore, 2000);
+            }
+            Toast.success('RSS 地址已复制');
+        }
+    },
+
     async showRssModal(fakeid, nickname) {
         // Remove existing modal if any
         const existing = document.getElementById('rss-modal-overlay');
@@ -244,14 +300,8 @@ const AccountsPage = {
             console.error("加载订阅状态失败", err);
         }
 
-        let baseOrigin = (settings.rss_base_url || '').trim().replace(/\/+$/, '');
-        if (baseOrigin && !/^https?:\/\//i.test(baseOrigin)) {
-            baseOrigin = 'https://' + baseOrigin;
-        }
-        baseOrigin = baseOrigin || window.location.origin;
-        const token = (settings.rss_token || '').trim();
-        const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
-        const rssUrl = `${baseOrigin}/api/articles/rss/${encodeURIComponent(nickname)}${tokenQuery}`;
+        this.rssSettings = settings;
+        const rssUrl = this.buildRssUrl(nickname, settings);
 
         let isSubscribed = sub ? sub.enabled : false;
         let interval = sub ? sub.interval_minutes : 60;
