@@ -114,7 +114,7 @@ def search_accounts():
         mark_rate_limited,
         activate_terminal_session,
     )
-    from backend.waterwall import detect_waterwall, waterwall_hit, record_failure, is_waterwall_active
+    from backend.waterwall import detect_waterwall, waterwall_hit, record_failure, is_waterwall_active, waterwall_snapshot
     headers = sanitize_apk_headers(headers)
 
     # ── 模式 1：链接 / biz 解析 ──────────────────────────
@@ -200,8 +200,14 @@ def search_accounts():
 
         # 智能重试循环 (支持 401 单飞自动续期、-2014 冷却与 -2041/-2012 处理)
         resp = None
+        error_msg = ""
         for attempt in range(3):
-            if is_waterwall_active() or get_rate_limit_status()[0]:
+            if is_waterwall_active():
+                error_msg = "触发微信读书防水墙风控，工具已暂停请求，请在页面完成滑块验证后重试"
+                break
+            throttled_loop, left_loop = get_rate_limit_status()
+            if throttled_loop:
+                error_msg = f"触发频控冷却中，请 {left_loop} 秒后再试"
                 break
             pace_weread_request(url_mp)
             resp = s.get(url_mp, headers=headers, timeout=10)
@@ -209,6 +215,7 @@ def search_accounts():
             if ww:
                 record_failure(url_mp, resp.status_code, resp.headers, resp.text, ww)
                 waterwall_hit(url_mp, resp.status_code, ww)
+                error_msg = "触发微信读书防水墙风控，工具已暂停请求，请在页面完成滑块验证后重试"
                 break
             if resp.status_code == 200:
                 try:
@@ -217,6 +224,7 @@ def search_accounts():
                         cd = mark_rate_limited(url_mp)
                         record_failure(url_mp, resp.status_code, resp.headers, resp.text, "-2014")
                         account_pool.report(acc_id, status_code=200, ret=-2014, error_msg=f"频控 -2014，冷却 {cd}s")
+                        error_msg = f"触发频控冷却中，请 {cd} 秒后再试"
                         resp = None
                         break
                 except Exception:
@@ -232,6 +240,7 @@ def search_accounts():
                     cd = mark_rate_limited(url_mp)
                     record_failure(url_mp, resp.status_code, resp.headers, resp.text, "-2014")
                     account_pool.report(acc_id, status_code=resp.status_code, ret=-2014, error_msg=f"频控 -2014，冷却 {cd}s")
+                    error_msg = f"触发频控冷却中，请 {cd} 秒后再试"
                     break
                 elif "-2012" in err_text:
                     time.sleep(0.5)
@@ -241,10 +250,13 @@ def search_accounts():
                         continue
                     record_failure(url_mp, resp.status_code, resp.headers, resp.text, "-2041")
                     waterwall_hit(url_mp, resp.status_code, "-2041")
+                    error_msg = "触发微信读书风控（-2041），请在页面完成滑块验证后重试"
                     break
                 else:
+                    error_msg = f"微信读书接口异常（HTTP {resp.status_code}）：{resp.text[:100]}"
                     break
             else:
+                error_msg = f"微信读书接口异常（HTTP {resp.status_code}）：{resp.text[:100]}"
                 break
 
         if resp and resp.status_code == 200:
@@ -288,8 +300,17 @@ def search_accounts():
                             "signature": b_info.get("intro", ""),
                             "service_type": 1,
                         })
+            elif not error_msg:
+                error_msg = f"微信读书接口异常（HTTP {resp_gen.status_code}）：{resp_gen.text[:100]}"
 
-        return jsonify({"results": results, "total": len(results)})
+        payload = {"results": results, "total": len(results)}
+        if error_msg and not results:
+            payload["error"] = error_msg
+            # 防水墙激活时附带状态快照，前端 api.js 检测到 need_verify 会自动拉起滑块验证
+            if is_waterwall_active():
+                payload["need_verify"] = True
+                payload["waterwall"] = waterwall_snapshot()
+        return jsonify(payload)
 
     except Exception as e:
         return jsonify({"error": f"搜索公众号失败: {str(e)}"}), 500
