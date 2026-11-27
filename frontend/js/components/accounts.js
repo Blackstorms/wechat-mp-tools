@@ -155,6 +155,10 @@ const AccountsPage = {
                 results.innerHTML = `
                     <div style="padding: 16px; text-align: center; color: ${data.error ? 'var(--error)' : 'var(--text-muted)'};">
                         ${data.error ? '搜索失败: ' + data.error : '未找到匹配的公众号'}
+                        ${data.need_verify ? `
+                        <div style="margin-top: 10px;">
+                            <button class="btn btn-sm btn-primary" onclick="WaterWall.triggerCaptcha()">🛡️ 完成滑块验证</button>
+                        </div>` : ''}
                     </div>
                 `;
                 return;

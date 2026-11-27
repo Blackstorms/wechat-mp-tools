@@ -40,11 +40,7 @@ const WaterWall = {
         if (this.isShowingCaptcha) return;
 
         if (typeof TencentCaptcha === 'undefined') {
-            if (typeof Toast !== 'undefined') {
-                Toast.warning('腾讯防水墙组件正在加载，请稍候...');
-            } else {
-                alert('腾讯防水墙组件正在加载，请稍候...');
-            }
+            this._loadCaptchaScript(() => this.triggerCaptcha(options));
             return;
         }
 
@@ -187,8 +183,37 @@ const WaterWall = {
         this.renderBanner(info);
         // 自动拉起滑块
         this.triggerCaptcha();
+    },
+
+    /**
+     * 腾讯 TCaptcha 脚本可能因网络原因未加载成功，动态补载后重试一次
+     */
+    _loadCaptchaScript(onReady) {
+        if (this._captchaLoading) {
+            if (typeof Toast !== 'undefined') Toast.warning('腾讯防水墙组件正在加载，请稍候...');
+            return;
+        }
+        this._captchaLoading = true;
+        const script = document.createElement('script');
+        script.src = 'https://captcha.gtimg.com/TCaptcha.js';
+        script.onload = () => {
+            this._captchaLoading = false;
+            if (typeof TencentCaptcha !== 'undefined') {
+                onReady();
+            } else {
+                if (typeof Toast !== 'undefined') Toast.error('防水墙组件加载失败，请刷新页面重试');
+            }
+        };
+        script.onerror = () => {
+            this._captchaLoading = false;
+            if (typeof Toast !== 'undefined') Toast.error('防水墙组件加载失败，请检查网络后刷新重试');
+        };
+        document.head.appendChild(script);
     }
 };
+
+// const 声明不会挂到 window 上，显式导出供 api.js 的 window.WaterWall 检测使用
+window.WaterWall = WaterWall;
 
 // 页面加载完成后自动探针
 if (typeof document !== 'undefined') {
