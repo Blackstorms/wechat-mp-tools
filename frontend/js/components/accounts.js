@@ -153,8 +153,8 @@ const AccountsPage = {
 
             if (items.length === 0) {
                 results.innerHTML = `
-                    <div style="padding: 16px; text-align: center; color: var(--text-muted);">
-                        未找到匹配的公众号
+                    <div style="padding: 16px; text-align: center; color: ${data.error ? 'var(--error)' : 'var(--text-muted)'};">
+                        ${data.error ? '搜索失败: ' + data.error : '未找到匹配的公众号'}
                     </div>
                 `;
                 return;

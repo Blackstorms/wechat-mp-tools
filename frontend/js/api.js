@@ -36,6 +36,11 @@ const API = {
                         WaterWall.handleDetection(data.waterwall || data);
                     }
                 }
+                // 管理后台启用了访问密码且未登录：跳转登录页
+                if (resp.status === 401 && data && data.auth_required) {
+                    const next = encodeURIComponent(location.pathname + location.search + location.hash);
+                    window.location.href = `/login?next=${next}`;
+                }
                 if (showError) Toast.error(errMsg);
                 // 保留结构化错误码，便于调用方区分「未登录」「风控」等可引导的场景
                 const error = new Error(errMsg);

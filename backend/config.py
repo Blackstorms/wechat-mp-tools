@@ -10,6 +10,7 @@ import time
 import random
 import string
 import threading
+import urllib.parse
 from pathlib import Path
 
 from backend.runtime import app_dir
@@ -426,41 +427,27 @@ def normalize_wechat_url(url: str) -> str:
 
 def init_admin_auth(app):
     """可选的 Web 管理后台访问安全防护中间件。
+
     当配置了 ADMIN_PASSWORD 环境变量或设置项时：
     - 公开放行：/healthz 探针、/api/articles/rss（由 RSS_TOKEN 独立保护）、/api/articles/avatars/、/api/articles/serve-file/
-    - 其余所有管理路由和接口：必须通过 HTTP Basic Auth 或 Token 校验，否则返回 401 触发浏览器密码弹窗。
+      以及登录页 /login 与登录/登出接口
+    - 页面请求未认证时重定向到 /login 登录页；API 请求未认证返回 401 JSON
+    - 兼容认证方式：登录 Cookie（admin_auth）、HTTP Basic（RSS 阅读器/curl 友好）、Bearer Token、URL 参数 ?auth=xxx
     - 未配置 ADMIN_PASSWORD 时：保持原样，局域网/本机直接免密访问。
     """
     import hmac
-    from flask import request, Response
+    from flask import redirect, request, Response, jsonify, make_response
 
-    @app.before_request
-    def _check_admin_auth():
+    def _get_admin_pass() -> str:
         settings = get_settings()
-        admin_pass = str(settings.get("admin_password") or os.environ.get("ADMIN_PASSWORD", "")).strip()
-        if not admin_pass:
-            return None
+        return str(settings.get("admin_password") or os.environ.get("ADMIN_PASSWORD", "")).strip()
 
-        if request.method == "OPTIONS":
-            return None
-
-        path = request.path
-
-        # 白名单放行路由
-        if (
-            path == "/healthz"
-            or path.startswith("/api/articles/rss")
-            or path.startswith("/api/articles/avatars/")
-            or path.startswith("/api/articles/serve-file/")
-        ):
-            return None
-
+    def _auth_ok(admin_pass: str) -> bool:
         # 1. 优先校验 HTTP Basic Auth（用户名随意，密码等于 admin_password）
         auth = request.authorization
         if auth and auth.password and hmac.compare_digest(auth.password, admin_pass):
-            return None
-
-        # 2. 兼容 Bearer Token、URL 参数 ?auth=xxx 或 Cookie admin_auth=xxx
+            return True
+        # 2. 兼容 Bearer Token、URL 参数 ?auth=xxx 或登录 Cookie admin_auth=xxx
         supplied = ""
         auth_hdr = request.headers.get("Authorization", "")
         if auth_hdr.lower().startswith("bearer "):
@@ -469,9 +456,44 @@ def init_admin_auth(app):
             supplied = request.args.get("auth", "").strip()
         elif request.cookies.get("admin_auth"):
             supplied = request.cookies.get("admin_auth", "").strip()
+        return bool(supplied) and hmac.compare_digest(supplied, admin_pass)
 
-        if supplied and hmac.compare_digest(supplied, admin_pass):
+    def _is_public(path: str) -> bool:
+        return (
+            path == "/healthz"
+            or path == "/login"
+            or path == "/api/auth/admin-login"
+            or path == "/api/auth/admin-logout"
+            or path.startswith("/api/articles/rss")
+            or path.startswith("/api/articles/avatars/")
+            or path.startswith("/api/articles/serve-file/")
+        )
+
+    @app.before_request
+    def _check_admin_auth():
+        admin_pass = _get_admin_pass()
+        if not admin_pass:
             return None
+
+        if request.method == "OPTIONS":
+            return None
+
+        path = request.path
+        if _is_public(path):
+            return None
+
+        if _auth_ok(admin_pass):
+            return None
+
+        # API 请求：返回结构化 401，前端据此跳转登录页
+        if path.startswith("/api/"):
+            return jsonify({"error": "需要管理员权限，请先登录", "auth_required": True}), 401
+
+        # 页面请求：重定向到登录页
+        accept = request.headers.get("Accept", "") or ""
+        if "text/html" in accept or "." not in path.rsplit("/", 1)[-1]:
+            next_url = request.full_path.rstrip("?")
+            return redirect("/login?next=" + urllib.parse.quote(next_url, safe=""))
 
         return Response(
             "需要管理员权限，请输入管理密码",
@@ -479,6 +501,125 @@ def init_admin_auth(app):
             headers={"WWW-Authenticate": 'Basic realm="Wechat Tools Admin", charset="UTF-8"'},
             mimetype="text/plain; charset=utf-8",
         )
+
+    @app.route("/login", methods=["GET"])
+    def admin_login_page():
+        if not _get_admin_pass():
+            return redirect("/")
+        return ADMIN_LOGIN_HTML
+
+    @app.route("/api/auth/admin-login", methods=["POST"])
+    def admin_login():
+        admin_pass = _get_admin_pass()
+        if not admin_pass:
+            return jsonify({"ok": True, "message": "未配置管理密码，无需登录"})
+        data = request.get_json(silent=True) or {}
+        password = str(data.get("password", "")).strip()
+        if not password or not hmac.compare_digest(password, admin_pass):
+            return jsonify({"error": "密码错误"}), 401
+        resp = make_response(jsonify({"ok": True}))
+        resp.set_cookie(
+            "admin_auth", admin_pass, max_age=30 * 86400,
+            httponly=True, samesite="Lax",
+        )
+        return resp
+
+    @app.route("/api/auth/admin-logout", methods=["POST"])
+    def admin_logout():
+        resp = make_response(jsonify({"ok": True}))
+        resp.delete_cookie("admin_auth")
+        return resp
+
+
+ADMIN_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录 - WeChat MP Tools</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #e8f5e9 0%, #f1f8f4 50%, #e3f0e7 100%);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .card {
+    width: 360px; padding: 40px 32px; background: #fff; border-radius: 16px;
+    box-shadow: 0 8px 32px rgba(7, 193, 96, 0.12);
+  }
+  .logo { text-align: center; font-size: 44px; margin-bottom: 12px; }
+  h1 { text-align: center; font-size: 1.25rem; color: #1a1a1a; margin-bottom: 8px; }
+  .desc { text-align: center; font-size: 0.85rem; color: #888; margin-bottom: 28px; }
+  label { display: block; font-size: 0.85rem; color: #555; margin-bottom: 6px; }
+  input {
+    width: 100%; padding: 12px 14px; border: 1px solid #dcdfe3; border-radius: 10px;
+    font-size: 0.95rem; outline: none; transition: border-color .2s;
+  }
+  input:focus { border-color: #07c160; }
+  button {
+    width: 100%; margin-top: 20px; padding: 12px; border: none; border-radius: 10px;
+    background: #07c160; color: #fff; font-size: 1rem; cursor: pointer; transition: background .2s;
+  }
+  button:hover { background: #06ad56; }
+  button:disabled { background: #9adbb8; cursor: wait; }
+  .error {
+    display: none; margin-top: 12px; padding: 8px 12px; border-radius: 8px;
+    background: #fff0f0; color: #d4380d; font-size: 0.82rem; text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">📰</div>
+  <h1>WeChat MP Tools</h1>
+  <p class="desc">管理后台已启用访问保护，请输入管理密码登录</p>
+  <form id="login-form">
+    <label for="password">管理密码</label>
+    <input type="password" id="password" autocomplete="current-password" autofocus>
+    <button type="submit" id="submit-btn">登 录</button>
+    <div class="error" id="error-box"></div>
+  </form>
+</div>
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const next = params.get('next') || '/';
+  const target = next.startsWith('/') && !next.startsWith('//') ? next : '/';
+  const form = document.getElementById('login-form');
+  const input = document.getElementById('password');
+  const btn = document.getElementById('submit-btn');
+  const err = document.getElementById('error-box');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    btn.textContent = '登录中...';
+    err.style.display = 'none';
+    try {
+      const resp = await fetch('/api/auth/admin-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: input.value }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data.ok) {
+        location.href = target;
+        return;
+      }
+      err.textContent = data.error || '登录失败';
+      err.style.display = 'block';
+    } catch (ex) {
+      err.textContent = '网络错误，请稍后重试';
+      err.style.display = 'block';
+    }
+    btn.disabled = false;
+    btn.textContent = '登 录';
+  });
+})();
+</script>
+</body>
+</html>
+"""
 
 
 

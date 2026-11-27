@@ -238,7 +238,8 @@ const SettingsPage = {
                         <div class="form-group" style="margin-top: var(--spacing-md);">
                             <label class="form-label" for="setting-admin-password">Web 管理后台访问密码 (ADMIN_PASSWORD)</label>
                             <input type="password" class="form-input" id="setting-admin-password" placeholder="留空则内网免密；设置后访问管理后台需输入密码" />
-                            <div class="form-hint">若将整个服务通过 Lucky 反代暴露至公网，强烈建议配置此密码（启用 HTTP Basic 密码保护），防止管理后台被未授权访问。</div>
+                            <div class="form-hint">若将整个服务通过 Lucky 反代暴露至公网，强烈建议配置此密码。启用后未登录访客会被引导至登录页输入密码，RSS 订阅不受此影响（由 RSS_TOKEN 独立保护）。</div>
+                            <button class="btn btn-secondary btn-sm" style="margin-top: 8px; display: none;" id="admin-logout-btn" onclick="SettingsPage.adminLogout()">🚪 退出登录</button>
                         </div>
                     </div>
                 </div>
@@ -336,6 +337,8 @@ const SettingsPage = {
         if (rssBaseUrl) rssBaseUrl.value = data.rss_base_url || '';
         if (rssToken) rssToken.value = data.rss_token || '';
         if (adminPassword) adminPassword.value = data.admin_password || '';
+        const logoutBtn = document.getElementById('admin-logout-btn');
+        if (logoutBtn) logoutBtn.style.display = data.admin_password ? '' : 'none';
         
         if (biliQuality) biliQuality.value = data.bili_video_quality || '1080p';
         if (biliDanmaku) biliDanmaku.checked = data.bili_download_danmaku !== undefined ? !!data.bili_download_danmaku : true;
@@ -344,6 +347,15 @@ const SettingsPage = {
         this.syncRssEndMinute();
     },
 
+
+    async adminLogout() {
+        try {
+            await API.post('/api/auth/admin-logout');
+        } catch (err) {
+            // 即使失败也跳转，Cookie 过期后自然失效
+        }
+        window.location.href = '/login';
+    },
 
     toggleRssUpload() {
         const rssUploadEnabled = document.getElementById('setting-rss-upload-enabled');

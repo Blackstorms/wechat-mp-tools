@@ -131,7 +131,7 @@ docker compose up -d --build
 - `BIND_ADDR`：绑定地址（如需局域网或公网直接访问可设为 `0.0.0.0`，默认 `127.0.0.1` 配合 Nginx 反向代理）
 - `RSS_BASE_URL`：可选，反向代理时指定对外公开的 RSS 基准网址（前端复制订阅链接及 XML 导出的图片、链接将统一使用该域名）
 - `RSS_TOKEN`：可选，为 RSS 订阅源设置访问密钥（设置后需在订阅链接后附加 `?token=your_secret`）
-- `ADMIN_PASSWORD`：可选，Web 管理后台访问认证密码。若直接暴露公网，建议配置启用 HTTP Basic 密码保护（注：RSS 订阅不受此影响，继续由 `RSS_TOKEN` 独立保护）
+- `ADMIN_PASSWORD`：可选，Web 管理后台访问认证密码。若直接暴露公网，建议配置。配置后未登录访客访问页面会被引导至 `/login` 登录页输入密码（兼容 HTTP Basic 认证，方便 curl / 阅读器）；RSS 订阅不受此影响，继续由 `RSS_TOKEN` 独立保护）
 - `DB_TYPE`：数据库引擎类型（`sqlite` 或 `mysql`，默认 `sqlite`）
 
 ### 5. 反向代理与公网安全最佳实践 (Lucky / Nginx / Caddy)
